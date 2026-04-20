@@ -4,6 +4,7 @@ from __future__ import annotations
 import ctypes
 import logging
 import subprocess
+import time
 from collections.abc import Iterable
 from typing import Any
 
@@ -11,8 +12,13 @@ import psutil
 
 LOGGER = logging.getLogger(__name__)
 
-AI_GPU_MB_THRESHOLD = 500.0
+AI_GPU_MB_THRESHOLD = 200.0
+AI_CPU_THRESHOLD = 25.0
+AI_CPU_SUSTAINED_SECONDS = 3.0
 LOW_CPU_BACKGROUND_THRESHOLD = 1.0
+
+# Tracks monotonic timestamp when a PID first exceeded AI_CPU_THRESHOLD
+_sustained_cpu_start: dict[int, float] = {}
 
 _AI_EXECUTABLES = {"ollama.exe"}
 _EDITOR_EXECUTABLES = {"code.exe", "code-insiders.exe"}
@@ -132,6 +138,18 @@ def _classify_from_snapshot(
     if pid < 200 or lower_user in _SYSTEM_USERS:
         return "system"
 
+    # Track sustained high-CPU processes
+    if cpu_percent > AI_CPU_THRESHOLD:
+        if pid not in _sustained_cpu_start:
+            _sustained_cpu_start[pid] = time.monotonic()
+    else:
+        _sustained_cpu_start.pop(pid, None)
+
+    sustained_ai = (
+        pid in _sustained_cpu_start
+        and (time.monotonic() - _sustained_cpu_start[pid]) >= AI_CPU_SUSTAINED_SECONDS
+    )
+
     is_python_llm = lower_name == "python.exe" and any(
         hint in cmdline_blob for hint in _AI_CMDLINE_HINTS
     )
@@ -143,7 +161,8 @@ def _classify_from_snapshot(
         lower_name in _AI_EXECUTABLES
         or is_python_llm
         or is_node_agent
-        or gpu_mb > AI_GPU_MB_THRESHOLD
+        or gpu_mb >= AI_GPU_MB_THRESHOLD
+        or sustained_ai
     ):
         return "ai agent"
 
@@ -223,6 +242,8 @@ def get_global_process_rows(
             name = proc.info.get("name") or "unknown"
             raw_cpu_percent = float(proc.info.get("cpu_percent") or 0.0)
             cpu_percent = normalize_cpu_percent(raw_cpu_percent, cpu_count=cpu_count)
+            if is_idle_process_name(proc.info.get("name")):
+                cpu_percent = 0.0
             ram_mb = float(proc.info["memory_info"].rss) / (1024 * 1024)
             status = proc.info.get("status") or "unknown"
             username = proc.info.get("username") or ""

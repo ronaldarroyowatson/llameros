@@ -340,3 +340,56 @@ Bug: chart rendering cadence was coupled to slower data refresh timing, resultin
 ### [2026-04-19] — GUI control parity, stacked pressure, logging, and CPU normalization bugfix workflow execution
 
 Bug: the stacked pressure graph rendered staggered/gapped segments without axes, process-row selection was cleared by non-selection clicks, filter toggles lacked complete deterministic semantics, GUI-only controls had no CLI parity, debug logging coverage was sparse on known bug paths, and raw multi-core CPU percentages could surface `System Idle Process` as an impossible hog. Failing tests: added `tests/gui/test_stacked_pressure_continuous.py`, `tests/gui/test_stacked_pressure_grid_and_labels.py`, `tests/gui/test_process_selection_persistence.py`, `tests/gui/test_filters_ai_agents.py`, `tests/gui/test_filters_heavy_hitters.py`, `tests/gui/test_filters_monitored_processes.py`, `tests/cli/test_cli_process_control.py`, `tests/logging/test_debug_logging_paths.py`, `tests/system/test_cpu_usage_normalization.py`, and `tests/integration/test_ai_process_control.py` to reproduce the GUI, CLI, logging, classification, and control-path failures. Fix: unified stacked-pressure rendering with the continuous chart loop, made selection explicit-clear only, implemented shared deterministic process filtering, added scheduler-backed CLI process controls and debug logging configuration, normalized displayed CPU percentages, excluded idle capacity from hog reporting, and preserved raw CPU heuristics only where needed for classification. Expanded tests: executed the complete repository suite including GUI, integration, smoke, live, installer, and process/scheduler coverage after the targeted regressions. Version bump: `1.0.3` -> `1.0.4`.
+
+## 13. Gridline and Axis Label Standards
+
+- Every graph panel (`_draw_line`) must render horizontal gridlines at 0%, 25%, 50%, 75%, and 100% of panel height.
+- Every graph panel must render vertical time ticks at 10-second equivalent intervals derived from `_render_interval_ms` (every `round(10000 / render_interval_ms)` samples).
+- Every graph panel must display a Y-axis title label (e.g., "CPU Usage (%)", "RAM Usage (MB)", "VRAM Usage (MB)").
+- Every graph panel must display an X-axis label "Time (seconds)" along the bottom edge.
+- The stacked resource pressure graph also includes these gridlines and axis labels.
+- All gridlines and labels must redraw correctly on canvas resize events.
+
+## 14. Performance and Threading Rules
+
+- Data collection (process scanning, GPU queries, classification) runs in the Tkinter `after()` loop and must NOT block the main thread beyond the scheduled tick interval.
+- The render interval is 200 ms; the data refresh interval is 1000 ms. These are decoupled: rendering can happen without new data using last-known samples.
+- Sorting is performed in-process on cached row data and must complete in under 200 ms for up to 1000 rows.
+- Process stats are cached between data ticks; heavy re-scans are never triggered inline during sort or filter operations.
+- Thread-safety: all Tkinter widget updates must occur on the main thread via `after()` callbacks.
+
+## 15. CPU Normalization Rules
+
+- `normalize_cpu_percent(raw, cpu_count)` divides psutil's per-process CPU reading (which is relative to one core) by the logical CPU count so values are bounded to [0%, 100%] system-relative.
+- The `System Idle Process` (and any process whose name matches `_IDLE_PROCESS_NAMES`) must always display as 0% CPU and must never be reported as a top-CPU-hog.
+- The normalization is applied before storage in process rows and before any display or threshold comparison.
+- Raw (un-normalized) CPU is used only for internal classification heuristics where per-core granularity is meaningful.
+
+## 16. AI Agent Classification Rules
+
+- AI agents are detected using the following signals (any signal triggers "ai agent" classification):
+  - Executable name matches `_AI_EXECUTABLES` (e.g., `ollama.exe`).
+  - `python.exe` with command-line tokens matching any key in `_AI_CMDLINE_HINTS` (llm, llama, vllm, transformers, openai, copilot, agent, ollama).
+  - `node.exe` with "copilot" or "agent" in command-line tokens.
+  - GPU memory usage ≥ `AI_GPU_MB_THRESHOLD` (200 MB).
+  - CPU usage > `AI_CPU_THRESHOLD` (25%) sustained continuously for ≥ `AI_CPU_SUSTAINED_SECONDS` (3 seconds), tracked in `_sustained_cpu_start` module-level dict.
+- Sustained CPU tracking is maintained in the `_sustained_cpu_start` dict keyed by PID; stale entries are evicted when CPU drops below threshold.
+- Classification is performed in `_classify_from_snapshot`; all callers (`get_global_process_rows`, `classify_process`, `get_process_stats`) feed through this function.
+
+## 17. Filter Behavior Rules
+
+- All filter controls (`only_ai`, `only_heavy`, `only_monitored`) apply deterministically and are composable.
+- No filter combination may return an empty table as placeholder behavior when matching rows exist.
+- Filter logic lives exclusively in `process_utils.filter_process_rows`; GUI merely passes the active flags.
+- The AI filter returns all rows with `classification == "ai agent"` and must not return empty when AI-classified processes are present.
+
+## 18. Selection Persistence Rules
+
+- `_selected_pid` is sticky runtime state and may only be cleared by an explicit `_clear_selection()` call.
+- Clicking empty table space (Treeview fires `<<TreeviewSelect>>` with empty selection) must NOT clear `_selected_pid`.
+- `_refresh_table` must restore the visual Treeview highlight on the selected row after every full delete/re-insert cycle.
+- The per-process trend chart remains visible as long as `_selected_pid` is set; it is cleared only after `_clear_selection()`.
+
+### [2026-04-19] — Gridlines, AI thresholds, CPU normalization, selection persistence, and performance bugfix workflow execution
+
+Bug: CPU/RAM/GPU graph panels lacked horizontal gridlines and X-axis labels; AI-agent detection threshold was 500 MB (too high, masking LLM workloads using 200–499 MB VRAM); sustained-CPU-based AI classification was unimplemented; System Idle Process displayed 100% normalized CPU instead of 0%; `_refresh_table` did not restore visual selection after full redraw; and sort/filter latency was unvalidated. Failing tests: `tests/gui/test_graph_gridlines_all.py`, `tests/gui/test_graph_axis_labels.py`, `tests/gui/test_stacked_pressure_continuous_render.py`, `tests/gui/test_filter_ai_agents.py`, `tests/system/test_cpu_normalization.py`, `tests/performance/test_sort_latency.py`, `tests/performance/test_ui_responsiveness.py`, `tests/gui/test_selection_persistence.py`. Fix: added gridlines (25%/50%/75%/100%) and "Time (seconds)" X-axis label to `_draw_line`; lowered `AI_GPU_MB_THRESHOLD` to 200 MB; added `_sustained_cpu_start` dict and sustained-CPU AI-agent detection logic in `_classify_from_snapshot`; zeroed idle-process CPU in `get_global_process_rows`; added `selection_set()` restore call in `_refresh_table`. Version bump: `1.0.4` -> `1.0.5`.

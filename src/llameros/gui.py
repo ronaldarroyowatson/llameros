@@ -373,7 +373,7 @@ class LlamerosGUI:
             self._tree.delete(row_id)
 
         for row in self._sorted_rows(rows):
-            self._tree.insert(
+            row_id = self._tree.insert(
                 "",
                 tk.END,
                 values=(
@@ -387,6 +387,8 @@ class LlamerosGUI:
                     row.get("classification", "user"),
                 ),
             )
+            if getattr(self, "_selected_pid", None) is not None and int(row["pid"]) == self._selected_pid:
+                self._tree.selection_set(row_id)
 
     def _draw_line(
         self,
@@ -402,6 +404,34 @@ class LlamerosGUI:
     ) -> None:
         canvas.create_rectangle(x, y, x + w, y + h, outline="#2d3440")
         canvas.create_text(x + 8, y + 10, text=label, anchor=tk.W, fill="#d6deeb", font=("Segoe UI", 9))
+        canvas.create_text(
+            x + w / 2,
+            y + h - 4,
+            text="Time (seconds)",
+            anchor=tk.CENTER,
+            fill="#9fb0c0",
+            font=("Segoe UI", 8),
+        )
+
+        for pct in (25, 50, 75, 100):
+            py = y + h - (pct / 100.0) * h
+            canvas.create_line(x, py, x + w, py, fill="#24303b", dash=(2, 4))
+            canvas.create_text(x + w - 4, py - 2, text=str(pct), anchor=tk.E, fill="#738496")
+
+        if values:
+            span = max(1, len(values) - 1)
+            samples_per_tick = max(
+                1, int(round(10000 / max(1, getattr(self, "_render_interval_ms", 200))))
+            )
+            for index in range(samples_per_tick, len(values), samples_per_tick):
+                px = x + (index / span) * w
+                canvas.create_line(px, y, px, y + h, fill="#24303b", dash=(2, 4))
+                seconds = int(
+                    round((index * getattr(self, "_render_interval_ms", 200)) / 1000.0)
+                )
+                canvas.create_text(
+                    px, y + h - 14, text=str(seconds), anchor=tk.CENTER, fill="#738496"
+                )
 
         if not values:
             return

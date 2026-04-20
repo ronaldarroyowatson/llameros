@@ -112,3 +112,37 @@ When generating or modifying code in this project, Copilot must:
 - CPU metrics must be normalized to realistic total-system percentages for display and reporting.
 - `System Idle Process` must never be treated as a top CPU hog.
 - Debug logging must exist at critical paths and previously regressed locations, including process discovery, classification, scheduler decisions, filter application, graph updates, and CLI command handling.
+
+## Graph Rendering Requirements
+
+- All graph panels (CPU, RAM, GPU, stacked pressure) must include horizontal gridlines at 25%, 50%, 75%, and 100% of panel height.
+- All graph panels must include vertical time-tick lines at 10-second equivalent intervals.
+- All graph panels must display a Y-axis title label and an X-axis "Time (seconds)" label.
+- Gridlines and labels must redraw correctly on canvas resize events.
+
+## Performance and Thread-Safety Requirements
+
+- UI updates must never block the main Tkinter thread.
+- Data collection (process scanning, classification, GPU queries) must be scheduled via `after()`.
+- Sorting must complete in under 200 ms for up to 1000 process rows.
+- Process stats must be cached between ticks; re-scans must never be triggered inline during sort or filter.
+
+## CPU Normalization Requirements
+
+- CPU% displayed in all tables and charts must be normalized by logical CPU count (`raw / cpu_count`).
+- Normalized CPU% must be capped at 100%.
+- `System Idle Process` must always display as 0% CPU and must never be returned as top CPU hog.
+
+## AI Agent Classification Requirements
+
+- AI-GPU threshold for classification is 200 MB (not 500 MB).
+- Processes sustaining >25% CPU for >3 continuous seconds must be classified as AI agents.
+- `python.exe` with LLM/agent cmdline hints and `node.exe` with copilot/agent hints are always AI agents.
+- `ollama.exe` is always an AI agent regardless of resource usage.
+
+## Selection Persistence Requirements
+
+- `_selected_pid` must persist until `_clear_selection()` is called explicitly.
+- Clicking empty table space must NOT clear selection.
+- `_refresh_table` must restore the visual Treeview highlight on `_selected_pid` after every full redraw.
+- Selection must only be replaced by a new process click or cleared by the Clear Selection button.
