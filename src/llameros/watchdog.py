@@ -9,12 +9,7 @@ from .system_monitor import get_ram_usage
 from .process_rules import get_vram_limit, get_ram_limit, get_process_list
 from . import process_utils
 
-logging.basicConfig(
-    filename="llameros.log",
-    level=logging.INFO,
-    format="%(asctime)s  %(levelname)s  %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
-)
+LOGGER = logging.getLogger(__name__)
 
 _POLL_INTERVAL = 1  # seconds
 
@@ -33,7 +28,7 @@ def _heavy_hitter_names(rules: dict) -> list[str]:
     scored.sort(key=lambda item: (-item[0], item[1].lower()))
 
     for _, _, row in scored:
-        logging.warning(
+        LOGGER.warning(
             "Resource spike: PID=%s NAME=%s CLASS=%s CPU=%.1f RAM=%.1fMB GPU=%.1fMB",
             row["pid"],
             row["name"],
@@ -69,7 +64,7 @@ def _auto_add_heavy_hitters(rules: dict) -> None:
 
     process_names.extend(new_names)
     rules["processes"] = process_names
-    logging.info("Auto-added heavy hitters to monitored list: %s", ", ".join(new_names))
+    LOGGER.info("Auto-added heavy hitters to monitored list: %s", ", ".join(new_names))
 
 
 def _kill_first_match(process_names: list) -> bool:
@@ -83,13 +78,13 @@ def _kill_first_match(process_names: list) -> bool:
             proc = running[name]
             try:
                 if process_utils.is_system(proc.pid):
-                    logging.warning("Skipped killing system process '%s' (PID %s)", name, proc.pid)
+                    LOGGER.warning("Skipped killing system process '%s' (PID %s)", name, proc.pid)
                     continue
                 proc.kill()
-                logging.warning("Killed process '%s' (PID %s)", name, proc.pid)
+                LOGGER.warning("Killed process '%s' (PID %s)", name, proc.pid)
                 return True
             except (psutil.NoSuchProcess, psutil.AccessDenied) as exc:
-                logging.error("Failed to kill '%s': %s", name, exc)
+                LOGGER.error("Failed to kill '%s': %s", name, exc)
     return False
 
 
@@ -105,13 +100,13 @@ def run_once(rules: dict) -> None:
     process_names = get_process_list(rules)
 
     if vram_used > vram_limit:
-        logging.warning(
+        LOGGER.warning(
             "VRAM threshold exceeded: %.0f MB used / %.0f MB limit", vram_used, vram_limit
         )
         _kill_first_match(process_names)
 
     if ram_used > ram_limit:
-        logging.warning(
+        LOGGER.warning(
             "RAM threshold exceeded: %.0f MB used / %.0f MB limit", ram_used, ram_limit
         )
         _kill_first_match(process_names)
@@ -119,10 +114,10 @@ def run_once(rules: dict) -> None:
 
 def start(rules: dict) -> None:
     """Enter the main watchdog loop (runs until KeyboardInterrupt)."""
-    logging.info("Llameros watchdog started.")
+    LOGGER.info("Llameros watchdog started.")
     try:
         while True:
             run_once(rules)
             time.sleep(_POLL_INTERVAL)
     except KeyboardInterrupt:
-        logging.info("Llameros watchdog stopped.")
+        LOGGER.info("Llameros watchdog stopped.")

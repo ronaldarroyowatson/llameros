@@ -104,6 +104,7 @@ class TurnTakingScheduler:
             self._turn_taking_enabled = enabled
             self._active_pid = None
             self._slot_deadline = 0.0
+        LOGGER.debug("action=schedule turn_taking_enabled=%s", enabled)
 
     def get_turn_taking_mode(self) -> bool:
         with self._lock:
@@ -111,6 +112,7 @@ class TurnTakingScheduler:
 
     def pause(self, pid: int) -> bool:
         if process_utils.is_system(pid):
+            LOGGER.debug("action=pause pid=%s blocked=system", pid)
             return False
         ok = process_utils.suspend_process(pid)
         if ok:
@@ -118,6 +120,7 @@ class TurnTakingScheduler:
                 self._manual_paused.add(pid)
                 if self._active_pid == pid:
                     self._active_pid = None
+            LOGGER.debug("action=pause pid=%s success=%s", pid, ok)
         return ok
 
     def resume(self, pid: int) -> bool:
@@ -126,10 +129,12 @@ class TurnTakingScheduler:
             with self._lock:
                 self._manual_paused.discard(pid)
                 self._throttled.discard(pid)
+            LOGGER.debug("action=resume pid=%s success=%s", pid, ok)
         return ok
 
     def kill(self, pid: int) -> bool:
         if process_utils.is_system(pid):
+            LOGGER.debug("action=kill pid=%s blocked=system", pid)
             return False
         ok = process_utils.kill_process(pid)
         if ok:
@@ -139,6 +144,7 @@ class TurnTakingScheduler:
                 self._monitored.pop(pid, None)
                 if self._active_pid == pid:
                     self._active_pid = None
+            LOGGER.debug("action=kill pid=%s success=%s", pid, ok)
         return ok
 
     def set_priority(self, pid: int, level: int) -> None:
@@ -146,12 +152,17 @@ class TurnTakingScheduler:
             proc = self._monitored.get(pid)
             if proc:
                 proc.priority = max(1, min(10, int(level)))
+                LOGGER.debug("action=set-priority pid=%s name=%s level=%s", pid, proc.name, proc.priority)
 
     def set_background(self, pid: int, enabled: bool = True) -> None:
         with self._lock:
             proc = self._monitored.get(pid)
             if proc:
                 proc.background = enabled
+                LOGGER.debug("action=set-background pid=%s name=%s enabled=%s", pid, proc.name, enabled)
+
+    def bring_foreground(self, pid: int) -> None:
+        self.set_background(pid, enabled=False)
 
     def get_process_rows(self) -> list[dict]:
         rows: list[dict] = []
@@ -205,6 +216,13 @@ class TurnTakingScheduler:
                         classification=classification,
                         priority=default_priority,
                     )
+                    LOGGER.debug(
+                        "action=process-discovery pid=%s name=%s classification=%s priority=%s",
+                        pid,
+                        name,
+                        classification,
+                        default_priority,
+                    )
                 else:
                     self._monitored[pid].classification = classification
 
@@ -216,6 +234,13 @@ class TurnTakingScheduler:
         vram_used = get_gpu_memory()
         ram_used = get_ram_usage()
         cpu_used = psutil.cpu_percent(interval=0.0)
+        LOGGER.debug(
+            "action=schedule phase=resource-awareness vram_used=%.1f ram_used=%.1f cpu_used=%.1f row_count=%s",
+            vram_used,
+            ram_used,
+            cpu_used,
+            len(rows),
+        )
 
         hot: set[int] = set()
 
@@ -272,6 +297,7 @@ class TurnTakingScheduler:
 
             if not candidates:
                 self._active_pid = None
+                LOGGER.debug("action=schedule phase=turn-taking candidates=0")
                 return
 
             candidates.sort(key=lambda proc: (-proc.priority, proc.pid))
@@ -290,6 +316,11 @@ class TurnTakingScheduler:
 
             active_pid = self._active_pid
             candidate_pids = [proc.pid for proc in candidates]
+            LOGGER.debug(
+                "action=schedule phase=turn-taking active_pid=%s candidates=%s",
+                active_pid,
+                candidate_pids,
+            )
 
         for pid in candidate_pids:
             if pid == active_pid:

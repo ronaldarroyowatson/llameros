@@ -2,11 +2,14 @@
 from __future__ import annotations
 
 import ctypes
+import logging
 import subprocess
 from collections.abc import Iterable
 from typing import Any
 
 import psutil
+
+LOGGER = logging.getLogger(__name__)
 
 AI_GPU_MB_THRESHOLD = 500.0
 LOW_CPU_BACKGROUND_THRESHOLD = 1.0
@@ -30,6 +33,7 @@ _AI_CMDLINE_HINTS = {
     "agent",
     "ollama",
 }
+_IDLE_PROCESS_NAMES = {"system idle process", "idle"}
 
 
 def _gpu_memory_by_pid() -> dict[int, float]:
@@ -95,6 +99,17 @@ def _cmdline_tokens(cmdline: Iterable[str]) -> str:
     return " ".join(cmdline).lower()
 
 
+def normalize_cpu_percent(raw_cpu_percent: float, cpu_count: int | None = None) -> float:
+    """Normalize process CPU usage to total-system percentage."""
+    resolved_cpu_count = max(1, int(cpu_count or (psutil.cpu_count(logical=True) or 1)))
+    normalized = max(0.0, float(raw_cpu_percent) / resolved_cpu_count)
+    return min(100.0, normalized)
+
+
+def is_idle_process_name(name: str | None) -> bool:
+    return _name_lower(name) in _IDLE_PROCESS_NAMES
+
+
 def _classify_from_snapshot(
     *,
     pid: int,
@@ -148,19 +163,29 @@ def classify_process(pid: int) -> str:
             name = proc.name()
             username = proc.username() or ""
             cmdline_blob = _cmdline_tokens(proc.cmdline())
-            cpu_percent = float(proc.cpu_percent(interval=0.0))
+            raw_cpu_percent = float(proc.cpu_percent(interval=0.0))
+            cpu_percent = normalize_cpu_percent(raw_cpu_percent)
     except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
         return "background"
 
-    return _classify_from_snapshot(
+    classification = _classify_from_snapshot(
         pid=pid,
         name=name,
         username=username,
         cmdline_blob=cmdline_blob,
-        cpu_percent=cpu_percent,
+        cpu_percent=raw_cpu_percent,
         gpu_mb=float(gpu_map.get(pid, 0.0)),
         has_window=pid in window_pids,
     )
+    LOGGER.debug(
+        "action=classification pid=%s name=%s classification=%s cpu_percent=%.1f gpu_mb=%.1f",
+        pid,
+        name,
+        classification,
+        cpu_percent,
+        float(gpu_map.get(pid, 0.0)),
+    )
+    return classification
 
 
 def is_ai_agent(pid: int) -> bool:
@@ -189,13 +214,15 @@ def get_global_process_rows(
 
     gpu_map = _gpu_memory_by_pid()
     window_pids = _visible_window_pids()
+    cpu_count = max(1, int(psutil.cpu_count(logical=True) or 1))
     rows: list[dict[str, Any]] = []
 
     for proc in psutil.process_iter(["pid", "name", "cpu_percent", "memory_info", "status", "username", "cmdline"]):
         try:
             pid = int(proc.info["pid"])
             name = proc.info.get("name") or "unknown"
-            cpu_percent = float(proc.info.get("cpu_percent") or 0.0)
+            raw_cpu_percent = float(proc.info.get("cpu_percent") or 0.0)
+            cpu_percent = normalize_cpu_percent(raw_cpu_percent, cpu_count=cpu_count)
             ram_mb = float(proc.info["memory_info"].rss) / (1024 * 1024)
             status = proc.info.get("status") or "unknown"
             username = proc.info.get("username") or ""
@@ -210,7 +237,7 @@ def get_global_process_rows(
             name=name,
             username=username,
             cmdline_blob=cmdline_blob,
-            cpu_percent=cpu_percent,
+            cpu_percent=raw_cpu_percent,
             gpu_mb=gpu_mb,
             has_window=pid in window_pids,
         )
@@ -227,8 +254,47 @@ def get_global_process_rows(
                 "monitored": pid in monitored_pids or _name_lower(name) in monitored_names,
             }
         )
+        LOGGER.debug(
+            "action=process-discovery pid=%s name=%s classification=%s monitored=%s cpu_percent=%.1f ram_mb=%.1f gpu_mb=%.1f",
+            pid,
+            name,
+            classification,
+            pid in monitored_pids or _name_lower(name) in monitored_names,
+            cpu_percent,
+            ram_mb,
+            gpu_mb,
+        )
 
     return rows
+
+
+def filter_process_rows(
+    rows: list[dict[str, Any]],
+    rules: dict | None = None,
+    *,
+    only_ai: bool = False,
+    only_heavy: bool = False,
+    only_monitored: bool = False,
+) -> list[dict[str, Any]]:
+    """Apply deterministic GUI process filters without mutating input rows."""
+    filtered = list(rows)
+
+    if only_monitored:
+        filtered = [row for row in filtered if bool(row.get("monitored"))]
+    if only_ai:
+        filtered = [row for row in filtered if row.get("classification") == "ai agent"]
+    if only_heavy:
+        filtered = [row for row in filtered if is_heavy_hitter(row, rules)]
+
+    LOGGER.debug(
+        "action=filter only_ai=%s only_heavy=%s only_monitored=%s before=%s after=%s",
+        only_ai,
+        only_heavy,
+        only_monitored,
+        len(rows),
+        len(filtered),
+    )
+    return filtered
 
 
 def is_heavy_hitter(row: dict[str, Any], rules: dict | None = None) -> bool:
@@ -253,13 +319,17 @@ def is_heavy_hitter(row: dict[str, Any], rules: dict | None = None) -> bool:
 def get_top_cpu_process() -> dict[str, Any] | None:
     """Return the process consuming the most CPU."""
     top: dict[str, Any] | None = None
+    cpu_count = max(1, int(psutil.cpu_count(logical=True) or 1))
     for proc in psutil.process_iter(["pid", "name", "cpu_percent"]):
         try:
-            cpu_percent = float(proc.info.get("cpu_percent") or 0.0)
+            name = proc.info.get("name") or "unknown"
+            if is_idle_process_name(name):
+                continue
+            cpu_percent = normalize_cpu_percent(float(proc.info.get("cpu_percent") or 0.0), cpu_count=cpu_count)
             if top is None or cpu_percent > top["cpu_percent"]:
                 top = {
                     "pid": int(proc.info["pid"]),
-                    "name": proc.info.get("name") or "unknown",
+                    "name": name,
                     "cpu_percent": cpu_percent,
                 }
         except (psutil.NoSuchProcess, psutil.AccessDenied):
@@ -303,27 +373,36 @@ def get_top_gpu_process() -> dict[str, Any] | None:
 def suspend_process(pid: int) -> bool:
     """Suspend a process by PID; return True if action succeeded."""
     try:
-        psutil.Process(pid).suspend()
+        proc = psutil.Process(pid)
+        proc.suspend()
+        LOGGER.debug("action=pause pid=%s name=%s success=true", pid, proc.name())
         return True
     except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+        LOGGER.debug("action=pause pid=%s success=false", pid)
         return False
 
 
 def resume_process(pid: int) -> bool:
     """Resume a process by PID; return True if action succeeded."""
     try:
-        psutil.Process(pid).resume()
+        proc = psutil.Process(pid)
+        proc.resume()
+        LOGGER.debug("action=resume pid=%s name=%s success=true", pid, proc.name())
         return True
     except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+        LOGGER.debug("action=resume pid=%s success=false", pid)
         return False
 
 
 def kill_process(pid: int) -> bool:
     """Kill a process by PID; return True if action succeeded."""
     try:
-        psutil.Process(pid).kill()
+        proc = psutil.Process(pid)
+        proc.kill()
+        LOGGER.debug("action=kill pid=%s name=%s success=true", pid, proc.name())
         return True
     except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+        LOGGER.debug("action=kill pid=%s success=false", pid)
         return False
 
 
@@ -334,7 +413,8 @@ def get_process_stats(pid: int) -> dict[str, Any] | None:
     try:
         proc = psutil.Process(pid)
         with proc.oneshot():
-            cpu_percent = float(proc.cpu_percent(interval=0.0))
+            raw_cpu_percent = float(proc.cpu_percent(interval=0.0))
+            cpu_percent = normalize_cpu_percent(raw_cpu_percent)
             ram_mb = float(proc.memory_info().rss) / (1024 * 1024)
             status = proc.status()
             name = proc.name()
@@ -349,7 +429,7 @@ def get_process_stats(pid: int) -> dict[str, Any] | None:
         name=name,
         username=username,
         cmdline_blob=cmdline_blob,
-        cpu_percent=cpu_percent,
+        cpu_percent=raw_cpu_percent,
         gpu_mb=float(gpu_map.get(pid, 0.0)),
         has_window=pid in window_pids,
     )

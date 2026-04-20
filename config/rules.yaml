@@ -1,5 +1,6 @@
 vram_limit_mb: 14000
 ram_limit_mb: 30000
+LOG_LEVEL: INFO
 processes:
   - ollama.exe
   - python.exe

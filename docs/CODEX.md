@@ -312,3 +312,31 @@ Bug: scheduler and watchdog operations could act on non-eligible process classes
 ### [2026-04-19] — GUI continuous render, responsive layout, and sortable columns bugfix workflow execution
 
 Bug: chart rendering cadence was coupled to slower data refresh timing, resulting in visual gaps/black segments; root layout sections were not fully responsive during window resize; and table header sorting behavior did not enforce deterministic per-column toggle state for all displayed columns. Failing tests: added `tests/gui/test_graph_continuous_render.py`, `tests/gui/test_responsive_layout.py`, and `tests/gui/test_sortable_columns.py` to reproduce fixed-interval redraw, resize-responsiveness, and column sort toggle/type behavior failures. Fix: implemented independent render ticks with rolling history extension from last-known samples, migrated major GUI sections to weighted `grid` with `sticky="nsew"`, bound resize events to chart redraw, and added generic per-column header click sorting for numeric and string fields. Expanded tests: retained existing GUI regression coverage and executed the complete GUI suite with the new targeted tests. Version bump: `1.0.2` -> `1.0.3`.
+
+### GUI Rendering and Interaction Rules Addendum
+
+- The stacked resource pressure graph uses the same fixed render cadence and history-extension behavior as the CPU, RAM, and GPU charts so no sample gaps appear between refreshes.
+- Stacked pressure rendering includes horizontal gridlines at 25% intervals, vertical time ticks at 10-second equivalents derived from render cadence, and explicit axis labels for resource pressure and elapsed time.
+- Per-process selection is sticky runtime state: clicking empty space does not clear it, selecting another process replaces it, and only an explicit clear action removes the selection and its per-process trend view.
+- Filter controls must apply deterministic subsets without blanking the table as placeholder behavior.
+
+## 13. Global Monitoring Rules
+
+- Process CPU percentages shown in the GUI and process tables are normalized by logical CPU count so displayed values remain realistic on multi-core systems.
+- `System Idle Process` is excluded from top-CPU-hog reporting so idle capacity is never surfaced as an actionable hog.
+- Filter semantics are deterministic and composable for AI-agent, heavy-hitter, and monitored-only views.
+
+### AI Agent Awareness Addendum
+
+- AI-like Python workloads identified through agent/LLM command-line hints remain fully controllable through pause, resume, kill, priority, and background/foreground operations.
+- AI-agent visibility and operator controls are available through both GUI actions and CLI commands backed by the same scheduler control surface.
+
+### Scheduler Integration Addendum
+
+- Turn-taking mode is a scheduler control only and must never act as a table filter or blank the visible process list.
+- Scheduler metadata tracks explicit background/foreground state transitions and exposes them consistently to GUI and CLI control flows.
+- Structured debug logging is emitted for scheduler decisions, process discovery, classification, filter application, graph rendering, and CLI command handling when debug mode is enabled.
+
+### [2026-04-19] — GUI control parity, stacked pressure, logging, and CPU normalization bugfix workflow execution
+
+Bug: the stacked pressure graph rendered staggered/gapped segments without axes, process-row selection was cleared by non-selection clicks, filter toggles lacked complete deterministic semantics, GUI-only controls had no CLI parity, debug logging coverage was sparse on known bug paths, and raw multi-core CPU percentages could surface `System Idle Process` as an impossible hog. Failing tests: added `tests/gui/test_stacked_pressure_continuous.py`, `tests/gui/test_stacked_pressure_grid_and_labels.py`, `tests/gui/test_process_selection_persistence.py`, `tests/gui/test_filters_ai_agents.py`, `tests/gui/test_filters_heavy_hitters.py`, `tests/gui/test_filters_monitored_processes.py`, `tests/cli/test_cli_process_control.py`, `tests/logging/test_debug_logging_paths.py`, `tests/system/test_cpu_usage_normalization.py`, and `tests/integration/test_ai_process_control.py` to reproduce the GUI, CLI, logging, classification, and control-path failures. Fix: unified stacked-pressure rendering with the continuous chart loop, made selection explicit-clear only, implemented shared deterministic process filtering, added scheduler-backed CLI process controls and debug logging configuration, normalized displayed CPU percentages, excluded idle capacity from hog reporting, and preserved raw CPU heuristics only where needed for classification. Expanded tests: executed the complete repository suite including GUI, integration, smoke, live, installer, and process/scheduler coverage after the targeted regressions. Version bump: `1.0.3` -> `1.0.4`.

@@ -99,3 +99,16 @@ When generating or modifying code in this project, Copilot must:
 - Always ensure continuous graph rendering.
 - Always bind resize events to redraw logic.
 - Always maintain deterministic update intervals.
+
+## CLI Parity Requirements
+
+- All core GUI process actions must have CLI equivalents in `main.py`.
+- GUI and CLI process controls must reuse the same underlying scheduler/process-control logic.
+- Turn-taking enable and disable operations must be available from both GUI and CLI surfaces.
+
+## Expanded Monitoring Requirements
+
+- All filters must be functional, deterministic, and must not blank the table as placeholder behavior.
+- CPU metrics must be normalized to realistic total-system percentages for display and reporting.
+- `System Idle Process` must never be treated as a top CPU hog.
+- Debug logging must exist at critical paths and previously regressed locations, including process discovery, classification, scheduler decisions, filter application, graph updates, and CLI command handling.

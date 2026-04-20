@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from collections import deque
+import logging
 import tkinter as tk
 from tkinter import ttk, simpledialog, messagebox
 
@@ -11,6 +12,8 @@ from . import process_utils
 from .gpu_monitor import get_gpu_memory
 from .system_monitor import get_ram_usage
 from .scheduler import TurnTakingScheduler
+
+LOGGER = logging.getLogger(__name__)
 
 
 class LlamerosGUI:
@@ -57,6 +60,8 @@ class LlamerosGUI:
         self._selected_ram_history: deque[float] = deque(maxlen=self._max_history)
         self._selected_gpu_history: deque[float] = deque(maxlen=self._max_history)
         self._last_visible_rows: list[dict] = []
+        self._last_global_rows: list[dict] = []
+        self._last_monitored_rows: list[dict] = []
         self._last_system_sample: dict[str, float] | None = None
         self._last_selected_sample: dict[str, float] | None = None
 
@@ -95,21 +100,25 @@ class LlamerosGUI:
             toggle_frame,
             text="Show all processes",
             variable=self._show_all_processes_var,
+            command=self._refresh_visible_view,
         ).grid(row=0, column=1, padx=4, sticky="w")
         ttk.Checkbutton(
             toggle_frame,
             text="Show only AI agents",
             variable=self._only_ai_var,
+            command=self._refresh_visible_view,
         ).grid(row=0, column=2, padx=4, sticky="w")
         ttk.Checkbutton(
             toggle_frame,
             text="Show only heavy hitters",
             variable=self._only_heavy_var,
+            command=self._refresh_visible_view,
         ).grid(row=0, column=3, padx=4, sticky="w")
         ttk.Checkbutton(
             toggle_frame,
             text="Show only monitored processes",
             variable=self._only_monitored_var,
+            command=self._refresh_visible_view,
         ).grid(row=0, column=4, padx=4, sticky="w")
         toggle_frame.columnconfigure(5, weight=1)
 
@@ -183,7 +192,10 @@ class LlamerosGUI:
         ttk.Button(button_frame, text="Set Background", command=self._set_background_selected).grid(
             row=0, column=4, padx=4, sticky="ew"
         )
-        for idx in range(5):
+        ttk.Button(button_frame, text="Clear Selection", command=self._clear_selection).grid(
+            row=0, column=5, padx=4, sticky="ew"
+        )
+        for idx in range(6):
             button_frame.columnconfigure(idx, weight=1)
 
         self._grid_major_sections(table_frame, charts_frame, button_frame)
@@ -208,18 +220,28 @@ class LlamerosGUI:
 
     def _toggle_turn_taking(self) -> None:
         self._scheduler.set_turn_taking_mode(self._turn_taking_var.get())
+        LOGGER.debug("action=filter turn_taking_enabled=%s", self._turn_taking_var.get())
 
-    def _on_row_selected(self, event: tk.Event) -> None:
+    def _on_row_selected(self, event: tk.Event | None) -> None:
         del event
         selected = self._tree.selection()
         if not selected:
-            self._selected_pid = None
             return
         values = self._tree.item(selected[0], "values")
         if not values:
-            self._selected_pid = None
             return
         self._selected_pid = int(values[0])
+        LOGGER.debug("action=selection pid=%s", self._selected_pid)
+
+    def _clear_selection(self) -> None:
+        self._selected_pid = None
+        self._last_selected_sample = None
+        self._selected_cpu_history.clear()
+        self._selected_ram_history.clear()
+        self._selected_gpu_history.clear()
+        if hasattr(self, "_tree") and hasattr(self._tree, "selection_remove"):
+            self._tree.selection_remove(*self._tree.selection())
+        LOGGER.debug("action=selection cleared=true")
 
     def _selected_pid_value(self) -> int | None:
         return self._selected_pid
@@ -263,6 +285,20 @@ class LlamerosGUI:
         if pid is None:
             return
         self._scheduler.set_background(pid, enabled=True)
+
+    def _find_selected_row(self, visible_rows: list[dict]) -> dict | None:
+        if self._selected_pid is None:
+            return None
+
+        for row in visible_rows:
+            if int(row["pid"]) == self._selected_pid:
+                return row
+
+        for row in getattr(self, "_last_global_rows", []):
+            if int(row["pid"]) == self._selected_pid:
+                return row
+
+        return process_utils.get_process_stats(self._selected_pid)
 
     def _refresh_hogs(self, rows: list[dict]) -> None:
         top_cpu = process_utils.get_top_cpu_process()
@@ -324,14 +360,13 @@ class LlamerosGUI:
 
     def _visible_rows(self, global_rows: list[dict], monitored_rows: list[dict]) -> list[dict]:
         rows = list(global_rows) if self._show_all_processes_var.get() else list(monitored_rows)
-
-        if self._only_monitored_var.get():
-            rows = [row for row in rows if bool(row.get("monitored"))]
-        if self._only_ai_var.get():
-            rows = [row for row in rows if row.get("classification") == "ai agent"]
-        if self._only_heavy_var.get():
-            rows = [row for row in rows if process_utils.is_heavy_hitter(row, self._rules)]
-        return rows
+        return process_utils.filter_process_rows(
+            rows,
+            rules=self._rules,
+            only_ai=self._only_ai_var.get(),
+            only_heavy=self._only_heavy_var.get(),
+            only_monitored=self._only_monitored_var.get(),
+        )
 
     def _refresh_table(self, rows: list[dict]) -> None:
         for row_id in self._tree.get_children():
@@ -399,6 +434,13 @@ class LlamerosGUI:
             fill="#d6deeb",
             font=("Segoe UI", 9),
         )
+        canvas.create_text(x + 12, y + (h / 2), text="Resource Pressure (%)", anchor=tk.W, fill="#9fb0c0")
+        canvas.create_text(x + (w / 2), y + h - 8, text="Time (seconds)", anchor=tk.CENTER, fill="#9fb0c0")
+
+        for percent in (0, 25, 50, 75, 100):
+            py = y + h - ((percent / 100.0) * h)
+            canvas.create_line(x, py, x + w, py, fill="#24303b", dash=(2, 4))
+            canvas.create_text(x + w - 4, py - 2, text=str(percent), anchor=tk.E, fill="#738496")
 
         if not self._cpu_history:
             return
@@ -411,24 +453,36 @@ class LlamerosGUI:
         gpu_max = max(1.0, max(gpu_values))
         span = max(1, len(cpu_values) - 1)
 
+        cpu_points: list[float] = []
+        ram_points: list[float] = []
+        total_points: list[float] = []
+        samples_per_tick = max(1, int(round(10000 / max(1, getattr(self, "_render_interval_ms", 200)))))
+
         for index in range(len(cpu_values)):
             px = x + (index / span) * w
-            cpu_norm = min(1.0, cpu_values[index] / 100.0)
-            ram_norm = min(1.0, ram_values[index] / ram_max)
-            gpu_norm = min(1.0, gpu_values[index] / gpu_max)
+            cpu_pct = min(100.0, max(0.0, cpu_values[index]))
+            ram_pct = min(100.0, max(0.0, (ram_values[index] / ram_max) * 100.0))
+            gpu_pct = min(100.0, max(0.0, (gpu_values[index] / gpu_max) * 100.0))
 
-            total = cpu_norm + ram_norm + gpu_norm
-            if total <= 0.0:
-                continue
+            cpu_top = y + h - ((cpu_pct / 100.0) * h)
+            ram_top = y + h - ((min(100.0, cpu_pct + ram_pct) / 100.0) * h)
+            total_top = y + h - ((min(100.0, cpu_pct + ram_pct + gpu_pct) / 100.0) * h)
 
-            cpu_h = h * (cpu_norm / total)
-            ram_h = h * (ram_norm / total)
-            gpu_h = h * (gpu_norm / total)
+            cpu_points.extend((px, cpu_top))
+            ram_points.extend((px, ram_top))
+            total_points.extend((px, total_top))
 
-            y_base = y + h
-            canvas.create_line(px, y_base, px, y_base - cpu_h, fill="#ff6b6b")
-            canvas.create_line(px, y_base - cpu_h, px, y_base - cpu_h - ram_h, fill="#4dabf7")
-            canvas.create_line(px, y_base - cpu_h - ram_h, px, y_base - cpu_h - ram_h - gpu_h, fill="#51cf66")
+            if index and index % samples_per_tick == 0:
+                seconds = int(round((index * getattr(self, "_render_interval_ms", 200)) / 1000.0))
+                canvas.create_line(px, y, px, y + h, fill="#24303b", dash=(2, 4))
+                canvas.create_text(px, y + h - 20, text=str(seconds), anchor=tk.CENTER, fill="#738496")
+
+        if len(cpu_points) >= 4:
+            canvas.create_line(*cpu_points, fill="#ff6b6b", width=2, smooth=True)
+        if len(ram_points) >= 4:
+            canvas.create_line(*ram_points, fill="#4dabf7", width=2, smooth=True)
+        if len(total_points) >= 4:
+            canvas.create_line(*total_points, fill="#51cf66", width=2, smooth=True)
 
     def _draw_charts(self, visible_rows: list[dict]) -> None:
         if not hasattr(self, "_last_system_sample"):
@@ -494,9 +548,7 @@ class LlamerosGUI:
         )
         self._draw_stacked_pressure(self._system_canvas, 16 + panel_w, 156, panel_w, panel_h)
 
-        selected = None
-        if self._selected_pid is not None:
-            selected = next((row for row in visible_rows if int(row["pid"]) == self._selected_pid), None)
+        selected = self._find_selected_row(visible_rows)
 
         if selected:
             self._last_selected_sample = {
@@ -510,7 +562,7 @@ class LlamerosGUI:
                 self._selected_ram_history.append(self._last_selected_sample["ram"])
             if not self._selected_gpu_history:
                 self._selected_gpu_history.append(self._last_selected_sample["gpu"])
-        else:
+        elif self._selected_pid is None:
             self._last_selected_sample = None
             self._selected_cpu_history.clear()
             self._selected_ram_history.clear()
@@ -528,6 +580,8 @@ class LlamerosGUI:
                 font=("Segoe UI", 9),
             )
             return
+
+        LOGGER.debug("action=graph-render selected_pid=%s visible_rows=%s", selected["pid"], len(visible_rows))
 
         label = (
             f"Per-process Usage: {selected['name']} (PID {selected['pid']}) "
@@ -585,6 +639,9 @@ class LlamerosGUI:
             monitored_names=monitored_names,
         )
 
+        self._last_monitored_rows = list(monitored_rows)
+        self._last_global_rows = list(global_rows)
+
         visible_rows = self._visible_rows(global_rows=global_rows, monitored_rows=monitored_rows)
         self._last_visible_rows = list(visible_rows)
 
@@ -594,16 +651,14 @@ class LlamerosGUI:
             "gpu": float(get_gpu_memory()),
         }
 
-        selected = None
-        if self._selected_pid is not None:
-            selected = next((row for row in visible_rows if int(row["pid"]) == self._selected_pid), None)
+        selected = self._find_selected_row(visible_rows)
         if selected:
             self._last_selected_sample = {
                 "cpu": float(selected["cpu_percent"]),
                 "ram": float(selected["ram_mb"]),
                 "gpu": float(selected["gpu_mb"]),
             }
-        else:
+        elif self._selected_pid is None:
             self._last_selected_sample = None
 
         self._refresh_hogs(global_rows)
@@ -638,11 +693,27 @@ class LlamerosGUI:
             self._selected_ram_history.append(float(self._last_selected_sample["ram"]))
             self._selected_gpu_history.append(float(self._last_selected_sample["gpu"]))
 
+        LOGGER.debug(
+            "action=graph-render system_samples=%s selected_samples=%s",
+            len(self._cpu_history),
+            len(self._selected_cpu_history),
+        )
         self._draw_charts(self._last_visible_rows)
         self._schedule_render_tick()
 
     def _refresh(self) -> None:
         self._data_tick()
+
+    def _refresh_visible_view(self) -> None:
+        visible_rows = self._visible_rows(
+            global_rows=getattr(self, "_last_global_rows", []),
+            monitored_rows=getattr(self, "_last_monitored_rows", []),
+        )
+        self._last_visible_rows = list(visible_rows)
+        if hasattr(self, "_tree"):
+            self._refresh_table(visible_rows)
+        if hasattr(self, "_system_canvas") and hasattr(self, "_process_canvas"):
+            self._draw_charts(visible_rows)
 
     def _on_close(self) -> None:
         self._scheduler.stop()

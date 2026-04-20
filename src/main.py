@@ -1,6 +1,7 @@
 """main.py - Entry point for the Llameros GPU/RAM watchdog."""
 import argparse
 import json
+import logging
 import subprocess
 import sys
 import threading
@@ -15,9 +16,11 @@ from llameros.scheduler import TurnTakingScheduler
 from llameros.gui import start_gui
 from llameros import gpu_monitor
 from llameros import system_monitor
+from llameros.logging_utils import configure_logging
 
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
+LOGGER = logging.getLogger(__name__)
 
 
 def _read_version() -> str:
@@ -67,26 +70,84 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--version", action="store_true", help="Print the Llameros version and exit")
     parser.add_argument("--diagnostics", action="store_true", help="Print diagnostics as JSON and exit")
     parser.add_argument("--repair", action="store_true", help="Run installer/repair.ps1 and exit")
+    parser.add_argument("--debug", action="store_true", help="Enable debug logging")
+    parser.add_argument("--list-processes", action="store_true", help="List process rows as JSON and exit")
+    parser.add_argument("--pause", type=int, metavar="PID", help="Pause a process by PID and exit")
+    parser.add_argument("--resume", type=int, metavar="PID", help="Resume a process by PID and exit")
+    parser.add_argument("--kill", type=int, metavar="PID", help="Kill a process by PID and exit")
+    parser.add_argument("--set-priority", nargs=2, metavar=("PID", "LEVEL"), help="Set monitored process priority and exit")
+    parser.add_argument("--set-background", type=int, metavar="PID", help="Mark a process as background and exit")
+    parser.add_argument("--bring-foreground", type=int, metavar="PID", help="Remove background flag from a process and exit")
+    parser.add_argument("--enable-turn-taking", action="store_true", help="Enable turn-taking mode and exit")
+    parser.add_argument("--disable-turn-taking", action="store_true", help="Disable turn-taking mode and exit")
     return parser
 
 
-def main():
-    args = _build_parser().parse_args()
+def _handle_cli_actions(args: argparse.Namespace, scheduler: TurnTakingScheduler) -> int | None:
+    if hasattr(scheduler, "_sync_processes"):
+        scheduler._sync_processes()
+
+    if args.list_processes:
+        rows = scheduler.get_process_rows()
+        LOGGER.debug("action=cli command=list-processes row_count=%s", len(rows))
+        print(json.dumps(rows, sort_keys=True))
+        return 0
+
+    actions = [
+        (args.pause is not None, "pause", lambda: scheduler.pause(args.pause)),
+        (args.resume is not None, "resume", lambda: scheduler.resume(args.resume)),
+        (args.kill is not None, "kill", lambda: scheduler.kill(args.kill)),
+        (
+            args.set_priority is not None,
+            "set-priority",
+            lambda: scheduler.set_priority(int(args.set_priority[0]), int(args.set_priority[1])) or True,
+        ),
+        (args.set_background is not None, "set-background", lambda: scheduler.set_background(args.set_background, enabled=True) or True),
+        (
+            args.bring_foreground is not None,
+            "bring-foreground",
+            lambda: (
+                scheduler.bring_foreground(args.bring_foreground)
+                if hasattr(scheduler, "bring_foreground")
+                else scheduler.set_background(args.bring_foreground, enabled=False)
+            )
+            or True,
+        ),
+        (args.enable_turn_taking, "enable-turn-taking", lambda: scheduler.set_turn_taking_mode(True) or True),
+        (args.disable_turn_taking, "disable-turn-taking", lambda: scheduler.set_turn_taking_mode(False) or True),
+    ]
+
+    for enabled, command_name, action in actions:
+        if not enabled:
+            continue
+        LOGGER.debug("action=cli command=%s", command_name)
+        return 0 if action() is not False else 1
+
+    return None
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = _build_parser().parse_args(argv)
+    initial_rules = load_rules()
+    configure_logging(initial_rules, debug=args.debug)
 
     if args.version:
         print(_read_version())
-        return
+        return 0
 
     if args.diagnostics:
         _print_diagnostics()
-        return
+        return 0
 
     if args.repair:
         raise SystemExit(_run_repair())
 
-    rules = load_rules()
+    rules = initial_rules
 
     scheduler = TurnTakingScheduler(rules)
+    cli_result = _handle_cli_actions(args, scheduler)
+    if cli_result is not None:
+        return cli_result
 
     # Deterministic startup order: scheduler thread, watchdog thread, then GUI loop.
     scheduler_thread = threading.Thread(target=scheduler.start, name="llameros-scheduler", daemon=True)
@@ -101,7 +162,8 @@ def main():
     watchdog_thread.start()
 
     start_gui(scheduler)
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
