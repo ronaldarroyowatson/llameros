@@ -1,0 +1,6 @@
+vram_limit_mb: 14000
+ram_limit_mb: 30000
+processes:
+  - ollama.exe
+  - python.exe
+  - VirtualBoxVM.exe
