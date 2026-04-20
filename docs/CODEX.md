@@ -171,3 +171,130 @@ Each bugfix will append a new entry here.
 ### [2026-04-19] — Cleared problems pane and fixed GUI tree scrolling keyword
 
 Bug: `Treeview.configure` used `yscroll` instead of `yscrollcommand`, and docs formatting issues generated deterministic Problems pane noise. Failing test: `tests/unit/test_bugfix_regressions.py` initially failed on GUI keyword and markdown hygiene checks. Fix: replaced `yscroll` with `yscrollcommand`, reformatted codex/workflow markdown to resolve lint violations, and expanded regression assertions for docs and codex code-fence language. Version bump: `1.0.0` -> `1.0.1`.
+
+## 8. Installer Lifecycle Architecture
+
+### Install Flow
+
+- Script: `installer/install.ps1`
+- The installer first runs `installer/detect_previous_install.ps1` to classify existing state.
+- If state is `none`, it performs a clean install into `Program Files\\Llameros` by default (or configured test override path).
+- It copies application payload files, creates `bin\\llameros.cmd`, creates a Start Menu shortcut, registers PATH, and writes registry metadata.
+- All actions are logged to `installer.log` with ISO 8601 UTC timestamps.
+
+### Uninstall Flow
+
+- Script: `installer/uninstall.ps1`
+- Removes install directory contents, Start Menu entry, installer registry key, and PATH registration.
+- Removes installer/runtime logs as part of directory cleanup and persistent state cleanup.
+- If user data is present, removal is confirmed unless explicit removal flags are supplied.
+- Uninstall is idempotent and safe to re-run without leaving orphan artifacts.
+
+### Repair Flow
+
+- Script: `installer/repair.ps1`
+- Detects current install state and validates required artifacts (`src\\main.py`, `config\\rules.yaml`, `VERSION`, `bin\\llameros.cmd`).
+- Restores missing artifacts from source payload, re-registers PATH, and re-registers registry metadata.
+- Performs post-repair integrity validation by re-running previous-install detection.
+- Logs each repair action and integrity result.
+
+### Reinstall Flow
+
+- Reinstall is performed by running `installer/install.ps1 -Reinstall`.
+- Reinstall overwrites payload files, refreshes PATH registration without duplicates, and updates registry version metadata.
+- Reinstall remains deterministic and idempotent for repeated runs.
+
+### Previous-Install Detection
+
+- Script: `installer/detect_previous_install.ps1`
+- Detection checks:
+  - Registry key presence and `InstallPath`
+  - Install directory presence
+  - Installed `VERSION` file presence
+- Return values are strict and machine-parseable:
+  - `none`
+  - `installed`
+  - `corrupted`
+
+### Registry Schema
+
+- Base key: `HKCU\\Software\\Llameros`
+- Values:
+  - `InstallPath` (string)
+  - `Version` (string)
+  - `InstallDate` (ISO 8601 UTC string)
+- Registry writes are explicit and avoid overwrite unless reinstall/repair mode is active.
+
+### PATH Rules
+
+- PATH registration targets `Llameros\\bin`.
+- Registration avoids duplicate entries and normalizes trailing separators.
+- Session PATH and persistent PATH are both updated.
+- PATH values are persisted without trailing semicolons.
+
+### Logging Rules
+
+- Installer lifecycle scripts write actions to `installer.log`.
+- Log entries use ISO 8601 UTC timestamps, script module context, and level labels.
+- Failures are surfaced explicitly with error-level log entries.
+
+### Test Suite Structure
+
+- Installer tests live under `tests/installer/` and cover:
+  - Clean install
+  - Clean uninstall
+  - Repair
+  - Reinstall
+  - Previous-install detection
+  - Version bump on reinstall
+- Tests use a sandboxed install root, sandboxed Start Menu root, test-scoped registry keys, and a test-scoped persistent PATH store.
+
+### 8.x Installer Bugfix Log Entries
+
+Each installer bugfix will append a new entry here.
+
+### [2026-04-19] — Added installer lifecycle architecture codex entries
+
+Appended installer lifecycle architecture covering install, uninstall, repair, reinstall, previous-install detection, registry schema, PATH handling, logging requirements, and the dedicated installer test suite structure.
+
+## 9. Global Process View Architecture
+
+- The GUI now supports a full global process table sourced from `psutil.process_iter()` and enriched with GPU memory from `nvidia-smi`.
+- Table columns include PID, process name, CPU%, RAM MB, GPU MB, status, priority, and classification.
+- The view supports deterministic sorting by any column and filter toggles for AI agents, heavy hitters, and monitored-only rows.
+- The GUI provides real-time chart panels for CPU, RAM, and GPU VRAM trends, plus a selected-process trend panel and stacked resource-pressure view.
+- Heavy hitter detection uses reproducible thresholds derived from `config/rules.yaml` limits and explicit GPU AI-agent criteria.
+
+## 10. AI Agent Awareness
+
+- AI agents are detected using executable and runtime signals:
+  - `ollama.exe`
+  - `python.exe` with LLM/agent-oriented command-line hints
+  - `node.exe` with Copilot/agent command-line hints
+  - Any process consuming more than 500 MB GPU VRAM
+- AI agents receive highest default scheduler priority (10) unless an operator override is applied.
+- AI agents are considered turn-taking eligible unless manually paused or currently throttled by resource controls.
+
+## 11. Scheduler Integration with Classification
+
+- Scheduler metadata tracks classification for each monitored PID and updates it during process synchronization.
+- Eligibility rules:
+  - AI agents: eligible
+  - Editors: not eligible
+  - VMs: eligible
+  - System processes: never eligible
+  - Background services: not eligible
+- Priority defaults:
+  - AI agents: 10
+  - Editors: 5
+  - VMs: 8
+  - Background services: 1
+- Time-slice logic scales from the configured base quantum using priority so higher-priority eligible processes receive longer slices deterministically.
+
+### [2026-04-19] — Added global process view, AI awareness, and classification scheduler codex entries
+
+Appended sections documenting the global process table, real-time charting model, automatic process classification, AI-agent prioritization, and scheduler eligibility/time-slice behavior wired to process class metadata.
+
+### [2026-04-19] — Classification-safe scheduling bugfix workflow execution
+
+Bug: scheduler and watchdog operations could act on non-eligible process classes (especially system/editor/background contexts) without explicit class-aware guards, and global process visibility/classification behavior lacked regression protection. Failing tests: added deterministic tests `tests/scheduler/test_turn_taking_with_classification.py` and `tests/process_utils/test_classification_rules.py` to reproduce class eligibility and classification-rule failures against pre-fix behavior. Fix: added explicit classification APIs in `process_utils.py`, class-aware scheduling eligibility and system-process safeguards in `scheduler.py`/`watchdog.py`, and GUI/global-process logic that consumes these deterministic classifications. Expanded tests: added GUI coverage (`tests/gui/test_global_process_view.py`, `tests/gui/test_charts_render.py`, `tests/gui/test_classification_display.py`), scheduler defaults/priority coverage (`tests/scheduler/test_priority_defaults.py`, `tests/scheduler/test_ai_agent_priority.py`), and AI detection coverage (`tests/process_utils/test_ai_agent_detection.py`). Version bump: `1.0.1` -> `1.0.2`.

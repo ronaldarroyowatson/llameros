@@ -1,9 +1,8 @@
-"""Tests for installer version bump behavior."""
+"""Tests for previous-install detection script."""
 
 from __future__ import annotations
 
 import subprocess
-import winreg
 from pathlib import Path
 
 
@@ -32,21 +31,16 @@ def run_script(installer_sandbox: dict, script_name: str, *args: str, expect_cod
     return result
 
 
-def _read_registry_value(subkey: str, name: str) -> str:
-    with winreg.OpenKey(winreg.HKEY_CURRENT_USER, subkey) as key:
-        value, _ = winreg.QueryValueEx(key, name)
-        return value
+def test_detect_previous_install_states(installer_sandbox: dict) -> None:
+    none_result = run_script(installer_sandbox, "detect_previous_install.ps1")
+    assert none_result.stdout.strip().splitlines()[-1] == "none"
 
-
-def test_reinstall_updates_version_after_bump(installer_sandbox: dict) -> None:
     run_script(installer_sandbox, "install.ps1")
 
-    (installer_sandbox["source_root"] / "VERSION").write_text("1.0.2\n", encoding="utf-8")
+    installed_result = run_script(installer_sandbox, "detect_previous_install.ps1")
+    assert installed_result.stdout.strip().splitlines()[-1] == "installed"
 
-    run_script(installer_sandbox, "install.ps1", "-Reinstall")
+    (installer_sandbox["install_root"] / "VERSION").unlink()
 
-    installed_version = (installer_sandbox["install_root"] / "VERSION").read_text(encoding="utf-8").strip()
-    assert installed_version == "1.0.2"
-
-    registry_version = _read_registry_value(installer_sandbox["registry_subkey"], "Version")
-    assert registry_version == "1.0.2"
+    corrupted_result = run_script(installer_sandbox, "detect_previous_install.ps1")
+    assert corrupted_result.stdout.strip().splitlines()[-1] == "corrupted"

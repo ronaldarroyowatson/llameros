@@ -20,6 +20,7 @@ LOGGER = logging.getLogger(__name__)
 class MonitoredProcess:
     pid: int
     name: str
+    classification: str = "user"
     priority: int = 5
     background: bool = False
 
@@ -48,6 +49,44 @@ class TurnTakingScheduler:
         self._active_pid: int | None = None
         self._slot_deadline = 0.0
 
+        self._priority_defaults = {
+            "ai agent": 10,
+            "editor": 5,
+            "vm": 8,
+            "background": 1,
+            "system": 1,
+            "user": 5,
+        }
+
+    def get_rules(self) -> dict:
+        return dict(self._rules)
+
+    def get_monitored_pids(self) -> set[int]:
+        with self._lock:
+            return set(self._monitored)
+
+    def get_monitored_names(self) -> set[str]:
+        with self._lock:
+            return {proc.name for proc in self._monitored.values()}
+
+    def _is_turn_taking_eligible(self, proc: MonitoredProcess) -> bool:
+        if proc.classification == "system":
+            return False
+        if proc.classification == "editor":
+            return False
+        if proc.classification == "background" or proc.background:
+            return False
+        if proc.classification == "ai agent":
+            return True
+        if proc.classification == "vm":
+            return True
+        return True
+
+    def _quantum_for_priority(self, priority: int) -> float:
+        bounded = max(1, min(10, int(priority)))
+        factor = 0.5 + (bounded / 10.0)
+        return max(0.5, self._quantum_seconds * factor)
+
     def start(self) -> None:
         """Run scheduler loop until stopped."""
         while not self._stop_event.is_set():
@@ -71,6 +110,8 @@ class TurnTakingScheduler:
             return self._turn_taking_enabled
 
     def pause(self, pid: int) -> bool:
+        if process_utils.is_system(pid):
+            return False
         ok = process_utils.suspend_process(pid)
         if ok:
             with self._lock:
@@ -88,6 +129,8 @@ class TurnTakingScheduler:
         return ok
 
     def kill(self, pid: int) -> bool:
+        if process_utils.is_system(pid):
+            return False
         ok = process_utils.kill_process(pid)
         if ok:
             with self._lock:
@@ -128,11 +171,14 @@ class TurnTakingScheduler:
                     "gpu_mb": stats["gpu_mb"],
                     "status": stats["status"],
                     "priority": proc.priority,
+                    "classification": proc.classification,
+                    "monitored": True,
                 }
             )
         return rows
 
     def _sync_processes(self) -> None:
+        self._process_names = list(self._rules.get("processes", []))
         running: dict[int, str] = {}
         for proc in psutil.process_iter(["pid", "name"]):
             try:
@@ -150,8 +196,17 @@ class TurnTakingScheduler:
                     self._throttled.discard(pid)
 
             for pid, name in running.items():
+                classification = process_utils.classify_process(pid)
+                default_priority = self._priority_defaults.get(classification, 5)
                 if pid not in self._monitored:
-                    self._monitored[pid] = MonitoredProcess(pid=pid, name=name)
+                    self._monitored[pid] = MonitoredProcess(
+                        pid=pid,
+                        name=name,
+                        classification=classification,
+                        priority=default_priority,
+                    )
+                else:
+                    self._monitored[pid].classification = classification
 
     def _apply_resource_awareness(self) -> None:
         rows = self.get_process_rows()
@@ -180,9 +235,12 @@ class TurnTakingScheduler:
         with self._lock:
             manual = set(self._manual_paused)
             throttled = set(self._throttled)
+            class_by_pid = {pid: proc.classification for pid, proc in self._monitored.items()}
 
         for pid in hot:
             if pid in manual:
+                continue
+            if class_by_pid.get(pid) in {"system", "editor", "background"}:
                 continue
             if process_utils.suspend_process(pid):
                 with self._lock:
@@ -205,7 +263,11 @@ class TurnTakingScheduler:
             candidates = [
                 proc
                 for proc in self._monitored.values()
-                if proc.pid not in self._manual_paused and proc.pid not in self._throttled
+                if (
+                    proc.pid not in self._manual_paused
+                    and proc.pid not in self._throttled
+                    and self._is_turn_taking_eligible(proc)
+                )
             ]
 
             if not candidates:
@@ -222,8 +284,9 @@ class TurnTakingScheduler:
 
             if should_advance:
                 self._rr_index = (self._rr_index + 1) % len(candidates)
-                self._active_pid = candidates[self._rr_index].pid
-                self._slot_deadline = now + self._quantum_seconds
+                chosen = candidates[self._rr_index]
+                self._active_pid = chosen.pid
+                self._slot_deadline = now + self._quantum_for_priority(chosen.priority)
 
             active_pid = self._active_pid
             candidate_pids = [proc.pid for proc in candidates]

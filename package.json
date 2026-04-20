@@ -1,0 +1,9 @@
+{
+  "name": "llameros",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Launcher scripts for the Llameros Python app",
+  "scripts": {
+    "dev": ".\\.venv\\Scripts\\python.exe src/main.py"
+  }
+}

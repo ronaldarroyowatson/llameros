@@ -25,7 +25,13 @@ No bug may be fixed without a failing test that reproduces it.
    - Integration tests
    - Smoke tests
    - Live tests
-   - Installer/uninstaller/repair tests
+   - Installer lifecycle tests:
+     - tests/installer/test_clean_install.py
+     - tests/installer/test_clean_uninstall.py
+     - tests/installer/test_repair_install.py
+     - tests/installer/test_reinstall.py
+     - tests/installer/test_detect_previous_install.py
+     - tests/installer/test_version_bump.py
 9. Clear the VS Code Problems pane.
 10. Bump the bugfix version number:
     - Major.Minor.Bugfix

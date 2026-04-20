@@ -1,4 +1,4 @@
-"""Tests for clean install behavior."""
+"""Tests for reinstall lifecycle behavior."""
 
 from __future__ import annotations
 
@@ -46,29 +46,23 @@ def _read_registry_values(subkey: str) -> dict[str, str]:
     return values
 
 
-def test_clean_install_creates_expected_artifacts(installer_sandbox: dict) -> None:
+def test_reinstall_overwrites_and_remains_clean(installer_sandbox: dict) -> None:
     run_script(installer_sandbox, "install.ps1")
 
-    install_root = installer_sandbox["install_root"]
-    assert (install_root / "src" / "main.py").exists()
-    assert (install_root / "config" / "rules.yaml").exists()
-    assert (install_root / "VERSION").read_text(encoding="utf-8").strip() == "1.0.1"
-    assert (install_root / "bin" / "llameros.cmd").exists()
+    readme_installed = installer_sandbox["install_root"] / "README.md"
+    readme_installed.write_text("stale content\n", encoding="utf-8")
 
-    start_menu_shortcut = installer_sandbox["start_menu_root"] / "Llameros" / "Llameros.lnk"
-    assert start_menu_shortcut.exists()
+    run_script(installer_sandbox, "install.ps1", "-Reinstall")
+
+    expected_readme = (installer_sandbox["source_root"] / "README.md").read_text(encoding="utf-8")
+    assert readme_installed.read_text(encoding="utf-8") == expected_readme
 
     registry_values = _read_registry_values(installer_sandbox["registry_subkey"])
-    assert registry_values["InstallPath"] == str(install_root)
+    assert registry_values["InstallPath"] == str(installer_sandbox["install_root"])
     assert registry_values["Version"] == "1.0.1"
-    assert "InstallDate" in registry_values
 
-    path_value = installer_sandbox["path_persist_file"].read_text(encoding="ascii").strip()
-    assert not path_value.endswith(";")
-    bin_path = str(install_root / "bin")
-    path_entries = [entry for entry in path_value.split(";") if entry]
-    assert any(entry.lower() == bin_path.lower() for entry in path_entries)
-
-    installer_log = installer_sandbox["install_log"]
-    assert installer_log.exists()
-    assert "Installation completed." in installer_log.read_text(encoding="utf-8")
+    persisted_path = installer_sandbox["path_persist_file"].read_text(encoding="ascii").strip()
+    bin_path = str(installer_sandbox["install_root"] / "bin")
+    entries = [entry for entry in persisted_path.split(";") if entry]
+    matching = [entry for entry in entries if entry.lower() == bin_path.lower()]
+    assert len(matching) == 1

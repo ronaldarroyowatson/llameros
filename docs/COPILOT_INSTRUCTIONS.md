@@ -71,3 +71,23 @@ When generating or modifying code in this project, Copilot must:
 - Always run the full test suite before declaring the fix complete.
 - Always bump the bugfix version number.
 - Always push and sync to Git after a successful fix.
+
+---
+
+## Installer Lifecycle Rules
+
+- All installer scripts must be idempotent.
+- No script may leave orphan files.
+- All registry writes must be explicit.
+- PATH updates must avoid duplicates.
+- All installer actions must be logged.
+- All installer bugs must follow the test-first bugfix workflow.
+- All installer tests must pass before version bump.
+
+## Global Monitoring Rules
+
+- Always classify processes before scheduling.
+- Never suspend system processes.
+- Always prioritize AI agents unless overridden.
+- Always update charts in real time.
+- Always maintain deterministic behavior.

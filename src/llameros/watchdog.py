@@ -7,6 +7,7 @@ import psutil
 from .gpu_monitor import get_gpu_memory
 from .system_monitor import get_ram_usage
 from .process_rules import get_vram_limit, get_ram_limit, get_process_list
+from . import process_utils
 
 logging.basicConfig(
     filename="llameros.log",
@@ -16,6 +17,59 @@ logging.basicConfig(
 )
 
 _POLL_INTERVAL = 1  # seconds
+
+
+def _heavy_hitter_names(rules: dict) -> list[str]:
+    rows = process_utils.get_global_process_rows(
+        monitored_names=set(get_process_list(rules)),
+    )
+    scored: list[tuple[float, str, dict]] = []
+    for row in rows:
+        if not process_utils.is_heavy_hitter(row, rules):
+            continue
+        score = float(row["cpu_percent"]) + (float(row["ram_mb"]) / 1024.0) + (float(row["gpu_mb"]) / 512.0)
+        scored.append((score, str(row["name"]), row))
+
+    scored.sort(key=lambda item: (-item[0], item[1].lower()))
+
+    for _, _, row in scored:
+        logging.warning(
+            "Resource spike: PID=%s NAME=%s CLASS=%s CPU=%.1f RAM=%.1fMB GPU=%.1fMB",
+            row["pid"],
+            row["name"],
+            row["classification"],
+            row["cpu_percent"],
+            row["ram_mb"],
+            row["gpu_mb"],
+        )
+
+    names: list[str] = []
+    seen: set[str] = set()
+    for _, name, _ in scored:
+        lower = name.lower()
+        if lower in seen:
+            continue
+        seen.add(lower)
+        names.append(name)
+    return names
+
+
+def _auto_add_heavy_hitters(rules: dict) -> None:
+    process_names = get_process_list(rules)
+    existing = {name.lower() for name in process_names}
+    new_names = []
+    for name in _heavy_hitter_names(rules):
+        if name.lower() in existing:
+            continue
+        new_names.append(name)
+        existing.add(name.lower())
+
+    if not new_names:
+        return
+
+    process_names.extend(new_names)
+    rules["processes"] = process_names
+    logging.info("Auto-added heavy hitters to monitored list: %s", ", ".join(new_names))
 
 
 def _kill_first_match(process_names: list) -> bool:
@@ -28,6 +82,9 @@ def _kill_first_match(process_names: list) -> bool:
         if name in running:
             proc = running[name]
             try:
+                if process_utils.is_system(proc.pid):
+                    logging.warning("Skipped killing system process '%s' (PID %s)", name, proc.pid)
+                    continue
                 proc.kill()
                 logging.warning("Killed process '%s' (PID %s)", name, proc.pid)
                 return True
@@ -38,6 +95,8 @@ def _kill_first_match(process_names: list) -> bool:
 
 def run_once(rules: dict) -> None:
     """Execute a single watchdog iteration (useful for testing)."""
+    _auto_add_heavy_hitters(rules)
+
     vram_used = get_gpu_memory()
     ram_used = get_ram_usage()
 
