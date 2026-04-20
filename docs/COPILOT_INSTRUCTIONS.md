@@ -91,3 +91,11 @@ When generating or modifying code in this project, Copilot must:
 - Always prioritize AI agents unless overridden.
 - Always update charts in real time.
 - Always maintain deterministic behavior.
+
+## GUI Behavior Requirements
+
+- Always implement responsive layouts.
+- Always implement sortable table columns.
+- Always ensure continuous graph rendering.
+- Always bind resize events to redraw logic.
+- Always maintain deterministic update intervals.

@@ -298,3 +298,17 @@ Appended sections documenting the global process table, real-time charting model
 ### [2026-04-19] — Classification-safe scheduling bugfix workflow execution
 
 Bug: scheduler and watchdog operations could act on non-eligible process classes (especially system/editor/background contexts) without explicit class-aware guards, and global process visibility/classification behavior lacked regression protection. Failing tests: added deterministic tests `tests/scheduler/test_turn_taking_with_classification.py` and `tests/process_utils/test_classification_rules.py` to reproduce class eligibility and classification-rule failures against pre-fix behavior. Fix: added explicit classification APIs in `process_utils.py`, class-aware scheduling eligibility and system-process safeguards in `scheduler.py`/`watchdog.py`, and GUI/global-process logic that consumes these deterministic classifications. Expanded tests: added GUI coverage (`tests/gui/test_global_process_view.py`, `tests/gui/test_charts_render.py`, `tests/gui/test_classification_display.py`), scheduler defaults/priority coverage (`tests/scheduler/test_priority_defaults.py`, `tests/scheduler/test_ai_agent_priority.py`), and AI detection coverage (`tests/process_utils/test_ai_agent_detection.py`). Version bump: `1.0.1` -> `1.0.2`.
+
+## 12. GUI Rendering and Interaction Rules
+
+- Graphs must update continuously at a fixed interval.
+- Graphs must never show gaps between data points.
+- All GUI elements must resize responsively.
+- All table columns must be sortable.
+- Sorting must toggle ascending/descending.
+- Layout must use weighted grid geometry.
+- Canvas must redraw on resize events.
+
+### [2026-04-19] — GUI continuous render, responsive layout, and sortable columns bugfix workflow execution
+
+Bug: chart rendering cadence was coupled to slower data refresh timing, resulting in visual gaps/black segments; root layout sections were not fully responsive during window resize; and table header sorting behavior did not enforce deterministic per-column toggle state for all displayed columns. Failing tests: added `tests/gui/test_graph_continuous_render.py`, `tests/gui/test_responsive_layout.py`, and `tests/gui/test_sortable_columns.py` to reproduce fixed-interval redraw, resize-responsiveness, and column sort toggle/type behavior failures. Fix: implemented independent render ticks with rolling history extension from last-known samples, migrated major GUI sections to weighted `grid` with `sticky="nsew"`, bound resize events to chart redraw, and added generic per-column header click sorting for numeric and string fields. Expanded tests: retained existing GUI regression coverage and executed the complete GUI suite with the new targeted tests. Version bump: `1.0.2` -> `1.0.3`.

@@ -36,6 +36,17 @@ class LlamerosGUI:
 
         self._sort_column = "priority"
         self._sort_reverse = True
+        self._sort_states: dict[str, bool] = {}
+        self._column_sort_key = {
+            "pid": "pid",
+            "name": "name",
+            "cpu": "cpu_percent",
+            "ram": "ram_mb",
+            "gpu": "gpu_mb",
+            "status": "status",
+            "priority": "priority",
+            "classification": "classification",
+        }
         self._selected_pid: int | None = None
 
         self._max_history = 90
@@ -45,54 +56,67 @@ class LlamerosGUI:
         self._selected_cpu_history: deque[float] = deque(maxlen=self._max_history)
         self._selected_ram_history: deque[float] = deque(maxlen=self._max_history)
         self._selected_gpu_history: deque[float] = deque(maxlen=self._max_history)
+        self._last_visible_rows: list[dict] = []
+        self._last_system_sample: dict[str, float] | None = None
+        self._last_selected_sample: dict[str, float] | None = None
+
+        self._data_refresh_ms = 1000
+        self._render_interval_ms = 200
 
         self._build_layout()
+        self._configure_root_grid_weights()
         self._root.protocol("WM_DELETE_WINDOW", self._on_close)
+        self._root.bind("<Configure>", self._on_resize)
 
     def run(self) -> None:
-        self._refresh()
+        self._data_tick()
+        self._schedule_render_tick()
         self._root.mainloop()
 
     def _build_layout(self) -> None:
         top_frame = ttk.Frame(self._root, padding=12)
-        top_frame.pack(fill=tk.X)
+        top_frame.grid(row=0, column=0, sticky="ew")
+        top_frame.columnconfigure(0, weight=1)
 
-        ttk.Label(top_frame, textvariable=self._top_cpu_var).pack(anchor=tk.W)
-        ttk.Label(top_frame, textvariable=self._top_ram_var).pack(anchor=tk.W)
-        ttk.Label(top_frame, textvariable=self._top_gpu_var).pack(anchor=tk.W)
-        ttk.Label(top_frame, textvariable=self._triple_hog_var).pack(anchor=tk.W)
+        ttk.Label(top_frame, textvariable=self._top_cpu_var).grid(row=0, column=0, sticky="w")
+        ttk.Label(top_frame, textvariable=self._top_ram_var).grid(row=1, column=0, sticky="w")
+        ttk.Label(top_frame, textvariable=self._top_gpu_var).grid(row=2, column=0, sticky="w")
+        ttk.Label(top_frame, textvariable=self._triple_hog_var).grid(row=3, column=0, sticky="w")
 
         toggle_frame = ttk.Frame(self._root, padding=(12, 0, 12, 12))
-        toggle_frame.pack(fill=tk.X)
+        toggle_frame.grid(row=1, column=0, sticky="ew")
         ttk.Checkbutton(
             toggle_frame,
             text="Turn-taking mode",
             variable=self._turn_taking_var,
             command=self._toggle_turn_taking,
-        ).pack(side=tk.LEFT, padx=4)
+        ).grid(row=0, column=0, padx=4, sticky="w")
         ttk.Checkbutton(
             toggle_frame,
             text="Show all processes",
             variable=self._show_all_processes_var,
-        ).pack(side=tk.LEFT, padx=4)
+        ).grid(row=0, column=1, padx=4, sticky="w")
         ttk.Checkbutton(
             toggle_frame,
             text="Show only AI agents",
             variable=self._only_ai_var,
-        ).pack(side=tk.LEFT, padx=4)
+        ).grid(row=0, column=2, padx=4, sticky="w")
         ttk.Checkbutton(
             toggle_frame,
             text="Show only heavy hitters",
             variable=self._only_heavy_var,
-        ).pack(side=tk.LEFT, padx=4)
+        ).grid(row=0, column=3, padx=4, sticky="w")
         ttk.Checkbutton(
             toggle_frame,
             text="Show only monitored processes",
             variable=self._only_monitored_var,
-        ).pack(side=tk.LEFT, padx=4)
+        ).grid(row=0, column=4, padx=4, sticky="w")
+        toggle_frame.columnconfigure(5, weight=1)
 
         table_frame = ttk.Frame(self._root, padding=(12, 0, 12, 12))
-        table_frame.pack(fill=tk.BOTH, expand=True)
+        table_frame.grid(row=2, column=0, sticky="nsew")
+        table_frame.rowconfigure(0, weight=1)
+        table_frame.columnconfigure(0, weight=1)
 
         columns = (
             "pid",
@@ -105,17 +129,17 @@ class LlamerosGUI:
             "classification",
         )
         self._tree = ttk.Treeview(table_frame, columns=columns, show="headings", height=16)
-        self._tree.heading("pid", text="PID", command=lambda: self._set_sort("pid"))
-        self._tree.heading("name", text="Process", command=lambda: self._set_sort("name"))
-        self._tree.heading("cpu", text="CPU%", command=lambda: self._set_sort("cpu_percent"))
-        self._tree.heading("ram", text="RAM MB", command=lambda: self._set_sort("ram_mb"))
-        self._tree.heading("gpu", text="GPU MB", command=lambda: self._set_sort("gpu_mb"))
-        self._tree.heading("status", text="Status", command=lambda: self._set_sort("status"))
-        self._tree.heading("priority", text="Priority", command=lambda: self._set_sort("priority"))
+        self._tree.heading("pid", text="PID", command=lambda: self._on_heading_click("pid"))
+        self._tree.heading("name", text="Process", command=lambda: self._on_heading_click("name"))
+        self._tree.heading("cpu", text="CPU%", command=lambda: self._on_heading_click("cpu_percent"))
+        self._tree.heading("ram", text="RAM MB", command=lambda: self._on_heading_click("ram_mb"))
+        self._tree.heading("gpu", text="GPU MB", command=lambda: self._on_heading_click("gpu_mb"))
+        self._tree.heading("status", text="Status", command=lambda: self._on_heading_click("status"))
+        self._tree.heading("priority", text="Priority", command=lambda: self._on_heading_click("priority"))
         self._tree.heading(
             "classification",
             text="Classification",
-            command=lambda: self._set_sort("classification"),
+            command=lambda: self._on_heading_click("classification"),
         )
 
         self._tree.column("pid", width=80, anchor=tk.CENTER)
@@ -131,29 +155,56 @@ class LlamerosGUI:
         self._tree.configure(yscrollcommand=scroll_y.set)
         self._tree.bind("<<TreeviewSelect>>", self._on_row_selected)
 
-        self._tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        scroll_y.pack(side=tk.RIGHT, fill=tk.Y)
+        self._tree.grid(row=0, column=0, sticky="nsew")
+        scroll_y.grid(row=0, column=1, sticky="ns")
 
         charts_frame = ttk.Frame(self._root, padding=(12, 0, 12, 12))
-        charts_frame.pack(fill=tk.BOTH, expand=False)
+        charts_frame.grid(row=3, column=0, sticky="nsew")
+        charts_frame.rowconfigure(0, weight=3)
+        charts_frame.rowconfigure(1, weight=2)
+        charts_frame.columnconfigure(0, weight=1)
 
         self._system_canvas = tk.Canvas(charts_frame, height=300, bg="#101318", highlightthickness=0)
-        self._system_canvas.pack(fill=tk.X, pady=(0, 8))
+        self._system_canvas.grid(row=0, column=0, sticky="nsew", pady=(0, 8))
         self._process_canvas = tk.Canvas(charts_frame, height=180, bg="#101318", highlightthickness=0)
-        self._process_canvas.pack(fill=tk.X)
+        self._process_canvas.grid(row=1, column=0, sticky="nsew")
+        self._system_canvas.bind("<Configure>", self._on_resize)
+        self._process_canvas.bind("<Configure>", self._on_resize)
 
         button_frame = ttk.Frame(self._root, padding=(12, 0, 12, 12))
-        button_frame.pack(fill=tk.X)
+        button_frame.grid(row=4, column=0, sticky="nsew")
 
-        ttk.Button(button_frame, text="Pause", command=self._pause_selected).pack(side=tk.LEFT, padx=4)
-        ttk.Button(button_frame, text="Resume", command=self._resume_selected).pack(side=tk.LEFT, padx=4)
-        ttk.Button(button_frame, text="Kill", command=self._kill_selected).pack(side=tk.LEFT, padx=4)
-        ttk.Button(button_frame, text="Set Priority", command=self._set_priority_selected).pack(
-            side=tk.LEFT, padx=4
+        ttk.Button(button_frame, text="Pause", command=self._pause_selected).grid(row=0, column=0, padx=4, sticky="ew")
+        ttk.Button(button_frame, text="Resume", command=self._resume_selected).grid(row=0, column=1, padx=4, sticky="ew")
+        ttk.Button(button_frame, text="Kill", command=self._kill_selected).grid(row=0, column=2, padx=4, sticky="ew")
+        ttk.Button(button_frame, text="Set Priority", command=self._set_priority_selected).grid(
+            row=0, column=3, padx=4, sticky="ew"
         )
-        ttk.Button(button_frame, text="Set Background", command=self._set_background_selected).pack(
-            side=tk.LEFT, padx=4
+        ttk.Button(button_frame, text="Set Background", command=self._set_background_selected).grid(
+            row=0, column=4, padx=4, sticky="ew"
         )
+        for idx in range(5):
+            button_frame.columnconfigure(idx, weight=1)
+
+        self._grid_major_sections(table_frame, charts_frame, button_frame)
+
+    def _configure_root_grid_weights(self) -> None:
+        self._root.columnconfigure(0, weight=1)
+        self._root.rowconfigure(0, weight=0)
+        self._root.rowconfigure(1, weight=0)
+        self._root.rowconfigure(2, weight=3)
+        self._root.rowconfigure(3, weight=2)
+        self._root.rowconfigure(4, weight=0)
+
+    @staticmethod
+    def _grid_major_sections(table_frame: ttk.Frame, charts_frame: ttk.Frame, button_frame: ttk.Frame) -> None:
+        table_frame.grid(sticky="nsew")
+        charts_frame.grid(sticky="nsew")
+        button_frame.grid(sticky="nsew")
+
+    def _on_resize(self, event: tk.Event | None = None) -> None:
+        del event
+        self._draw_charts(getattr(self, "_last_visible_rows", []))
 
     def _toggle_turn_taking(self) -> None:
         self._scheduler.set_turn_taking_mode(self._turn_taking_var.get())
@@ -249,17 +300,23 @@ class LlamerosGUI:
         value = float(item.get(metric_key, 0.0))
         return f"{item.get('name', 'unknown')} (PID {item.get('pid')}) - {value:.1f}{suffix}"
 
-    def _set_sort(self, column: str) -> None:
-        if self._sort_column == column:
-            self._sort_reverse = not self._sort_reverse
+    def _on_heading_click(self, column: str) -> None:
+        if not hasattr(self, "_sort_states"):
+            self._sort_states = {}
+        if column not in self._sort_states:
+            self._sort_states[column] = False
         else:
-            self._sort_column = column
-            self._sort_reverse = column in {"pid", "cpu_percent", "ram_mb", "gpu_mb", "priority"}
+            self._sort_states[column] = not self._sort_states[column]
+        self._sort_column = column
+        self._sort_reverse = self._sort_states[column]
 
     def _sorted_rows(self, rows: list[dict]) -> list[dict]:
+        values = [row.get(self._sort_column) for row in rows if row.get(self._sort_column) is not None]
+        is_numeric = bool(values) and all(isinstance(value, (int, float)) for value in values)
+
         def _key(item: dict) -> float | str:
             value = item.get(self._sort_column)
-            if isinstance(value, (int, float)):
+            if is_numeric:
                 return float(value)
             return str(value or "").lower()
 
@@ -374,16 +431,29 @@ class LlamerosGUI:
             canvas.create_line(px, y_base - cpu_h - ram_h, px, y_base - cpu_h - ram_h - gpu_h, fill="#51cf66")
 
     def _draw_charts(self, visible_rows: list[dict]) -> None:
+        if not hasattr(self, "_last_system_sample"):
+            self._last_system_sample = None
+        if not hasattr(self, "_last_selected_sample"):
+            self._last_selected_sample = None
+        if not hasattr(self, "_last_visible_rows"):
+            self._last_visible_rows = []
         self._system_canvas.delete("all")
         self._process_canvas.delete("all")
 
-        cpu_now = float(psutil.cpu_percent(interval=0.0))
-        ram_now = float(get_ram_usage())
-        gpu_now = float(get_gpu_memory())
+        self._last_visible_rows = list(visible_rows)
 
-        self._cpu_history.append(cpu_now)
-        self._ram_history.append(ram_now)
-        self._gpu_history.append(gpu_now)
+        if self._last_system_sample is None:
+            self._last_system_sample = {
+                "cpu": float(psutil.cpu_percent(interval=0.0)),
+                "ram": float(get_ram_usage()),
+                "gpu": float(get_gpu_memory()),
+            }
+        if not self._cpu_history:
+            self._cpu_history.append(self._last_system_sample["cpu"])
+        if not self._ram_history:
+            self._ram_history.append(self._last_system_sample["ram"])
+        if not self._gpu_history:
+            self._gpu_history.append(self._last_system_sample["gpu"])
 
         width = max(900, self._system_canvas.winfo_width())
         panel_w = (width - 24) / 2
@@ -429,10 +499,19 @@ class LlamerosGUI:
             selected = next((row for row in visible_rows if int(row["pid"]) == self._selected_pid), None)
 
         if selected:
-            self._selected_cpu_history.append(float(selected["cpu_percent"]))
-            self._selected_ram_history.append(float(selected["ram_mb"]))
-            self._selected_gpu_history.append(float(selected["gpu_mb"]))
+            self._last_selected_sample = {
+                "cpu": float(selected["cpu_percent"]),
+                "ram": float(selected["ram_mb"]),
+                "gpu": float(selected["gpu_mb"]),
+            }
+            if not self._selected_cpu_history:
+                self._selected_cpu_history.append(self._last_selected_sample["cpu"])
+            if not self._selected_ram_history:
+                self._selected_ram_history.append(self._last_selected_sample["ram"])
+            if not self._selected_gpu_history:
+                self._selected_gpu_history.append(self._last_selected_sample["gpu"])
         else:
+            self._last_selected_sample = None
             self._selected_cpu_history.clear()
             self._selected_ram_history.clear()
             self._selected_gpu_history.clear()
@@ -497,7 +576,7 @@ class LlamerosGUI:
             "GPU MB",
         )
 
-    def _refresh(self) -> None:
+    def _data_tick(self) -> None:
         monitored_rows = self._scheduler.get_process_rows()
         monitored_pids = self._scheduler.get_monitored_pids()
         monitored_names = self._scheduler.get_monitored_names()
@@ -507,10 +586,63 @@ class LlamerosGUI:
         )
 
         visible_rows = self._visible_rows(global_rows=global_rows, monitored_rows=monitored_rows)
+        self._last_visible_rows = list(visible_rows)
+
+        self._last_system_sample = {
+            "cpu": float(psutil.cpu_percent(interval=0.0)),
+            "ram": float(get_ram_usage()),
+            "gpu": float(get_gpu_memory()),
+        }
+
+        selected = None
+        if self._selected_pid is not None:
+            selected = next((row for row in visible_rows if int(row["pid"]) == self._selected_pid), None)
+        if selected:
+            self._last_selected_sample = {
+                "cpu": float(selected["cpu_percent"]),
+                "ram": float(selected["ram_mb"]),
+                "gpu": float(selected["gpu_mb"]),
+            }
+        else:
+            self._last_selected_sample = None
+
         self._refresh_hogs(global_rows)
         self._refresh_table(visible_rows)
-        self._draw_charts(visible_rows)
-        self._root.after(1000, self._refresh)
+        self._root.after(self._data_refresh_ms, self._data_tick)
+
+    def _schedule_render_tick(self) -> None:
+        self._root.after(getattr(self, "_render_interval_ms", 200), self._render_tick)
+
+    def _render_tick(self) -> None:
+        if not hasattr(self, "_last_system_sample"):
+            self._last_system_sample = None
+        if not hasattr(self, "_last_selected_sample"):
+            self._last_selected_sample = None
+        if not hasattr(self, "_last_visible_rows"):
+            self._last_visible_rows = []
+
+        if self._last_system_sample is None and self._cpu_history and self._ram_history and self._gpu_history:
+            self._last_system_sample = {
+                "cpu": float(self._cpu_history[-1]),
+                "ram": float(self._ram_history[-1]),
+                "gpu": float(self._gpu_history[-1]),
+            }
+
+        if self._last_system_sample:
+            self._cpu_history.append(float(self._last_system_sample["cpu"]))
+            self._ram_history.append(float(self._last_system_sample["ram"]))
+            self._gpu_history.append(float(self._last_system_sample["gpu"]))
+
+        if self._last_selected_sample:
+            self._selected_cpu_history.append(float(self._last_selected_sample["cpu"]))
+            self._selected_ram_history.append(float(self._last_selected_sample["ram"]))
+            self._selected_gpu_history.append(float(self._last_selected_sample["gpu"]))
+
+        self._draw_charts(self._last_visible_rows)
+        self._schedule_render_tick()
+
+    def _refresh(self) -> None:
+        self._data_tick()
 
     def _on_close(self) -> None:
         self._scheduler.stop()
